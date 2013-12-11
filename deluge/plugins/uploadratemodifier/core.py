@@ -43,9 +43,14 @@ from deluge.plugins.pluginbase import CorePluginBase
 import deluge.component as component
 import deluge.configmanager
 from deluge.core.rpcserver import export
+from twisted.internet.task import LoopingCall
 
 DEFAULT_PREFS = {
-    "test":"NiNiNi"
+    "default" : {
+        "activated" : False,
+        "ratio": 0.0,
+        "upload_limit": 0
+    }
 }
 
 log = logging.getLogger(__name__)
@@ -53,12 +58,56 @@ log = logging.getLogger(__name__)
 class Core(CorePluginBase):
     def enable(self):
         self.config = deluge.configmanager.ConfigManager("uploadratemodifier.conf", DEFAULT_PREFS)
+        #We check to see if labels are enabled
+        if 'Label' in component.get("CorePluginManager").get_enabled_plugins():
+            # Label is enabled, we create an entry for each label
+            labelPlugin = component.get("CorePlugin.Label")
+            for currentLabel in labelPlugin.get_labels():
+                if not currentLabel in self.config:
+                    self.add_label_to_config(currentLabel)
+            self.config.save()
+        
+        self.check_torrents_timer = LoopingCall(self.check_torrents)
+        self.check_torrents_timer.start(15)
+        log.info("UploadRateModifier plugin enabled!")
 
     def disable(self):
-        pass
+        self.check_torrents_timer.stop()
+        log.info("UploadRateModifier plugin disabled")
 
     def update(self):
         pass
+    
+    def check_torrents(self):
+        for torrent in component.get("Core").torrentmanager.get_torrent_list():
+            status_keys = ["is_seed",
+                           "paused",
+                           "ratio",
+                           "name",
+                           "label",
+                           "max_upload_speed"
+            ]
+            status = component.get("Core").get_torrent_status(torrent,status_keys)
+            if status["is_seed"] and not status["paused"]:
+                group = status["label"] or "default"
+                ratio = status["ratio"]
+                currentUploadSpeed = status["max_upload_speed"]
+                if not group in self.config:
+                    self.add_label_to_config(group)
+                
+                if self.config[group]["activated"]:
+                    if (ratio > self.config[group]["ratio"]) and (currentUploadSpeed == -1):
+                        log.info("Torrent %s meets limits. Limiting upload speed" % status["name"])
+                        component.get("Core").set_torrent_max_upload_speed(torrent,self.config[group]["upload_limit"])
+                        
+    
+    def add_label_to_config(self, label):
+        log.info("No config for %s yet, creating it" % label)
+        self.config[label] = {
+                              "activated" : False,
+                              "ratio": 0.0,
+                              "upload_limit": 0
+                              }
 
     @export
     def set_config(self, config):
